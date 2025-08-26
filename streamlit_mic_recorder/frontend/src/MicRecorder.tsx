@@ -88,12 +88,45 @@ class MicRecorder extends StreamlitComponentBase<State> {
             </div>
         );
     }
+    private getPreferredMimeType = (format: string | undefined): string | undefined => {
+        if (format === 'wav') {
+            return undefined;
+        }
+        if (format === 'webm') {
+            const candidates = [
+                'audio/webm;codecs=opus',
+                'audio/webm'
+            ];
+            return candidates.find(MediaRecorder.isTypeSupported);
+        }
+        if (format === 'aac') {
+            const candidates = [
+                'audio/mp4;codecs=mp4a.40.2',
+                'audio/mp4;codecs=aac',
+                'audio/mp4',
+                'audio/aac'
+            ];
+            return candidates.find(MediaRecorder.isTypeSupported);
+        }
+        return undefined;
+    }
+
+    private getBlobTypeForFormat = (format: string | undefined, recorderMime?: string): string => {
+        return recorderMime || (format === 'aac' ? 'audio/mp4' : 'audio/webm');
+    }
 
     private startRecording = () => {
         //console.log("Component starts recording");
 
         navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } }).then(stream => {
-            this.mediaRecorder = new MediaRecorder(stream);
+            const requestedFormat = this.props.args['format'];
+            const preferredMime = this.getPreferredMimeType(requestedFormat);
+            try {
+                this.mediaRecorder = preferredMime ? new MediaRecorder(stream, { mimeType: preferredMime }) : new MediaRecorder(stream);
+            } catch (e) {
+                // Fallback to browser default if our preferred type isn't constructible.
+                this.mediaRecorder = new MediaRecorder(stream);
+            }
 
             this.mediaRecorder.ondataavailable = event => {
                 if (event.data) {
@@ -127,7 +160,9 @@ class MicRecorder extends StreamlitComponentBase<State> {
         //console.log("Component processing the recording...");
         return new Promise<void>(async (resolve) => {
         
-            const audioBlob = new Blob(this.audioChunks, { type: this.mediaRecorder?.mimeType || 'audio/webm' });
+            const requestedFormat = this.props.args['format'];
+            const blobType = this.getBlobTypeForFormat(requestedFormat, this.mediaRecorder?.mimeType);
+            const audioBlob = new Blob(this.audioChunks, { type: blobType });
             const audioContext = new (window.AudioContext || window.webkitAudioContext)();
             const arrayBuffer = await audioBlob.arrayBuffer();
             const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
@@ -164,6 +199,21 @@ class MicRecorder extends StreamlitComponentBase<State> {
                     resolve();
                 };
                 reader.readAsDataURL(new Blob([wav], { type: 'audio/wav' }));
+            } else if (this.props.args['format'] === 'aac') {
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                    const base64String = reader.result?.toString().split(',')[1];
+                    this.output = {
+                        id: Date.now(),
+                        format: "aac",
+                        container: (this.mediaRecorder?.mimeType || blobType), // e.g., "audio/mp4;codecs=mp4a.40.2"
+                        audio_base64: base64String,
+                        sample_rate: sampleRate,
+                        sample_width: 2
+                    };
+                    resolve();
+                };
+                reader.readAsDataURL(audioBlob);
             };
         }); 
     };

@@ -216,9 +216,12 @@ class MicRecorder extends StreamlitComponentBase<State> {
 
             this.mediaRecorder.onstop = this.processAndSendRecording;
 
+            this.mediaRecorder.onstart = () => {
+                this.setState({ recording: true });
+            };
+
             this.mediaRecorder.start(1000);
 
-            this.setState({ recording: true });
         }).catch(error => {
             console.error("Error initializing media recording: ", error);
         });

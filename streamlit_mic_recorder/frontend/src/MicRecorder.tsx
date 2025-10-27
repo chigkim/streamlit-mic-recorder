@@ -121,7 +121,7 @@ class MicRecorder extends StreamlitComponentBase<State> {
     private startRecording = () => {
         //console.log("Component starts recording");
 
-        navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: true } }).then(async (stream) => {
+        navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false } }).then(async (stream) => {
             this.srcStream = stream;
 
             // 2) Build Web Audio graph: L/R -> sum -> mono -> MediaStream destination

@@ -18,8 +18,7 @@ class MicRecorder extends StreamlitComponentBase<State> {
     private audioChunks: Blob[] = [];
     private output?:object;
     private srcStream?: MediaStream;                // raw mic
-    private monoStream?: MediaStream;               // graph output (mono)
-    private audioCtx?: AudioContext;                // web audio context
+    private srcSampleRate?: number;                 // mic track's sample rate
     private stopGraph?: () => void;                 // teardown helper
     private readonly selectedDeviceStorageKey = 'streamlit_mic_recorder_selected_device_id';
     public state: State = {
@@ -237,10 +236,11 @@ class MicRecorder extends StreamlitComponentBase<State> {
         }
 
         // AGC is left off: with it enabled, Safari ramped gain slowly so recordings
-        // started quiet and jumped to full volume mid-clip. The Safari low-volume
-        // issue is instead addressed by summing L+R into mono in the audio graph
-        // below (Safari places the mic signal only on the left channel).
-        const audioConstraints: MediaTrackConstraints = { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+        // started quiet and jumped to full volume mid-clip.
+        // Echo cancellation is on: with it off, Safari recorded the first ~3.5 s
+        // about 40 dB too quiet and put the mic only on the left channel of a
+        // stereo track. With it on, Safari records mono at full level from the start.
+        const audioConstraints: MediaTrackConstraints = { channelCount: 1, echoCancellation: true, noiseSuppression: false, autoGainControl: false };
         // Honor the user's explicit choice with `exact`. An `ideal` hint isn't
         // enough: Chrome ignores it and keeps the OS default (e.g. an iPhone
         // Continuity mic), so picking the Mac mic would still open the iPhone. If
@@ -294,65 +294,19 @@ class MicRecorder extends StreamlitComponentBase<State> {
 
             this.srcStream = stream;
 
-            // 2) Build Web Audio graph: L+R -> sum -> mono -> MediaStream destination
-            const Ctor = (window as any).AudioContext || (window as any).webkitAudioContext;
-            this.audioCtx = new Ctor({ sampleRate: 48000 }); // 48k plays best with Opus, fine for AAC/WAV
-            const ctx = this.audioCtx!;
-            if (ctx.state === "suspended") {
-                await ctx.resume();
-            }
-
-            const source = ctx.createMediaStreamSource(stream);
-
-            // create destination and lock to mono
-            const dest = new MediaStreamAudioDestinationNode(ctx);
-            (dest as any).channelCount = 1;
-            (dest as any).channelCountMode = 'explicit';
-            (dest as any).channelInterpretation = 'speakers';
-
-            // check what the UA reports for channel count
-            const track = stream.getAudioTracks()[0];
-            const settings = (track.getSettings?.() ?? {}) as any;
-            const reportedCh = typeof settings.channelCount === 'number' ? settings.channelCount : 2;
-            if (reportedCh === 1) {
-              // Mono input: pass straight through to the mono destination.
-              source.connect(dest);
-            } else {
-              // Stereo input: sum L + R into mono. Connecting both splitter
-              // outputs into the same node sums them, so a signal present on
-              // either channel (e.g. Safari placing it only on the left) is
-              // preserved at full strength instead of being halved.
-              const splitter = new ChannelSplitterNode(ctx, { numberOfOutputs: 2 });
-              source.connect(splitter);
-              splitter.connect(dest, 0);   // L -> dest
-              splitter.connect(dest, 1);   // R -> dest (summed)
-              (this as any)._splitter = splitter;
-            }
-
-            // store dest stream as the one to record
-            this.monoStream = dest.stream;
-
-            // Teardown helper
+            // Record the mic track directly. Routing it through a Web Audio graph
+            // (AudioContext -> MediaStreamAudioDestinationNode) made Safari stutter
+            // and drop ~40 dB for the first few seconds while the context started.
+            // Any stereo-to-mono downmix is left to the server.
             this.stopGraph = () => {
-                try { source.disconnect(); } catch {}
-                if ((this as any)._splitter) {
-                    try { (this as any)._splitter.disconnect(); } catch {}
-                    (this as any)._splitter = undefined;
-                }
-                try { dest.disconnect(); } catch {}
                 if (this.srcStream) {
                     this.srcStream.getTracks().forEach(t => t.stop());
                 }
-                if (this.audioCtx && this.audioCtx.state !== 'closed') {
-                    this.audioCtx.close();
-                }
                 this.srcStream = undefined;
-                this.monoStream = undefined;
-                this.audioCtx = undefined;
             };
 
-            // 3) Record the MONO graph output
-            const recordStream = this.monoStream!;
+            this.srcSampleRate = (selectedTrack?.getSettings?.() as any)?.sampleRate;
+            const recordStream = stream;
 
             const requestedFormat = this.props.args['format'];
             const preferredMime = this.getPreferredMimeType(requestedFormat);
@@ -422,8 +376,8 @@ class MicRecorder extends StreamlitComponentBase<State> {
             const blobType = this.getBlobTypeForFormat(requestedFormat, this.mediaRecorder?.mimeType);
             const audioBlob = new Blob(this.audioChunks, { type: blobType });
 
-            // prefer the live graph's sampleRate; fall back to 48k
-            const sampleRateFromCtx = this.audioCtx?.sampleRate ?? 48000;
+            // prefer the mic track's sampleRate; fall back to 48k
+            const sampleRateFromCtx = this.srcSampleRate ?? 48000;
 
             // WAV path: decode -> PCM -> toWav -> base64
             if (requestedFormat === 'wav') {
